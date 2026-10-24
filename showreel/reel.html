@@ -1,0 +1,686 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Claude — Motion Reel 2026</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; position: absolute; inset: 0; margin: auto; width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+//  CLAUDE — MOTION REEL 2026
+//  15 s · 1920×1080 · 60 fps · 128 BPM — eight scenes, one per bar.
+//  Everything is a pure function of time, so any frame renders exactly.
+// ─────────────────────────────────────────────────────────────────────────────
+const W = 1920, H = 1080, FPS = 60, DUR = 15;
+const BPM = 128, B = 60 / BPM, BAR = B * 4;           // 0.46875 s / 1.875 s
+const C = {
+  ink: '#0A0A0F', paper: '#F3EFE6', orange: '#FF4A1C', blue: '#2F5BFF',
+  lime: '#D7FF3C', pink: '#FF3D7F', violet: '#7B5CFF', gold: '#FFC23C',
+};
+const FONT = '"Inter Display", "Inter", sans-serif';
+const MONO = '"DejaVu Sans Mono", monospace';
+const TAU = Math.PI * 2;
+
+const cv = document.getElementById('c'), out = cv.getContext('2d');
+const mk = (w = W, h = H) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+const scene = mk(), sx = scene.getContext('2d');
+const tmp = mk(), tx = tmp.getContext('2d');
+const tmp2 = mk(), tx2 = tmp2.getContext('2d');
+
+// ── math ────────────────────────────────────────────────────────────────────
+const clamp = (x, a = 0, b = 1) => x < a ? a : x > b ? b : x;
+const lerp = (a, b, t) => a + (b - a) * t;
+const inv = (a, b, t) => clamp((t - a) / (b - a));
+const E = {
+  o3: x => 1 - Math.pow(1 - x, 3),
+  o5: x => 1 - Math.pow(1 - x, 5),
+  i3: x => x * x * x,
+  io3: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2,
+  io5: x => x < .5 ? 16 * x ** 5 : 1 - Math.pow(-2 * x + 2, 5) / 2,
+  oExpo: x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x),
+  iExpo: x => x <= 0 ? 0 : Math.pow(2, 10 * x - 10),
+  ioExpo: x => x <= 0 ? 0 : x >= 1 ? 1 : x < .5 ? Math.pow(2, 20 * x - 10) / 2 : (2 - Math.pow(2, -20 * x + 10)) / 2,
+  oBack: (x, s = 1.70158) => 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2),
+  oElastic: x => x <= 0 ? 0 : x >= 1 ? 1 : Math.pow(2, -10 * x) * Math.sin((x * 10 - .75) * (TAU / 3)) + 1,
+  oBounce: x => {
+    const n = 7.5625, d = 2.75;
+    if (x < 1 / d) return n * x * x;
+    if (x < 2 / d) return n * (x -= 1.5 / d) * x + .75;
+    if (x < 2.5 / d) return n * (x -= 2.25 / d) * x + .9375;
+    return n * (x -= 2.625 / d) * x + .984375;
+  },
+};
+// damped spring, t in seconds
+const spring = (t, w = 14, z = .35) => t <= 0 ? 0 : 1 - Math.exp(-z * w * t) * Math.cos(w * Math.sqrt(1 - z * z) * t);
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const rgb = (c, k = 1, a = 1) => `rgba(${c[0] * k | 0},${c[1] * k | 0},${c[2] * k | 0},${a})`;
+const mix = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+
+// ── drawing helpers ─────────────────────────────────────────────────────────
+const bg = (c, col) => { c.fillStyle = col; c.fillRect(0, 0, W, H); };
+const circ = (c, x, y, r) => { c.beginPath(); c.arc(x, y, Math.max(0, r), 0, TAU); };
+function rrect(c, x, y, w, h, r) { c.beginPath(); c.roundRect(x, y, w, h, Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2)); }
+function setFont(c, size, w = 900, font = FONT) { c.font = `${w} ${size}px ${font}`; }
+// caps visually centred on y
+function cap(c, s, x, y, size, w = 900, color = C.paper, { align = 'center', track = 0, font = FONT, stroke = 0 } = {}) {
+  setFont(c, size, w, font); c.textAlign = align; c.textBaseline = 'alphabetic'; c.letterSpacing = track + 'px';
+  if (stroke) { c.strokeStyle = color; c.lineWidth = stroke; c.strokeText(s, x, y + size * .364); }
+  else { c.fillStyle = color; c.fillText(s, x, y + size * .364); }
+  c.letterSpacing = '0px';
+}
+function mono(c, s, x, y, size = 16, color = C.paper, align = 'left', track = 2) {
+  c.font = `500 ${size}px ${MONO}`; c.textAlign = align; c.textBaseline = 'middle'; c.letterSpacing = track + 'px';
+  c.fillStyle = color; c.fillText(s, x, y); c.letterSpacing = '0px';
+}
+function layout(c, s, size, w = 900, track = 0, font = FONT) {
+  setFont(c, size, w, font); c.letterSpacing = '0px';
+  const ch = [...s], ws = ch.map(k => c.measureText(k).width);
+  const total = ws.reduce((a, b) => a + b, 0) + track * (ch.length - 1);
+  let x = -total / 2;
+  return ch.map((k, i) => { const o = { ch: k, x: x + ws[i] / 2, w: ws[i] }; x += ws[i] + track; return o; });
+}
+const typed = (s, p) => s.slice(0, Math.floor(s.length * clamp(p)));
+const FX = { glitch: 0 };
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 0 — INTRO: dot → line → split → name → iris
+// ═════════════════════════════════════════════════════════════════════════════
+function gridLines(c, g, a = .06) {
+  c.strokeStyle = `rgba(243,239,230,${a})`; c.lineWidth = 1;
+  c.beginPath();
+  for (let x = 0; x <= W; x += 120) { c.moveTo(x + .5, 0); c.lineTo(x + .5, H * g); }
+  for (let y = 0; y <= H; y += 120) { c.moveTo(0, y + .5); c.lineTo(W * g, y + .5); }
+  c.stroke();
+}
+function s0(c, t) {
+  bg(c, C.ink);
+  gridLines(c, E.o3(inv(.1, 1.2, t)));
+  const cx = W / 2, cy = H / 2;
+  const push = 1 + .07 * E.io3(inv(.6, 1.875, t));
+  c.save(); c.translate(cx, cy); c.scale(push, push);
+  const pop = E.oElastic(inv(.02, .5, t));
+  const stretch = E.oExpo(inv(.32, .78, t));
+  const open = E.io5(inv(.6, 1.02, t));
+  const lw = lerp(28, 1500, stretch), lh = lerp(28, 6, E.o5(inv(.32, .55, t)));
+  c.fillStyle = C.orange;
+  if (t < .32) { circ(c, 0, 0, 14 * pop); c.fill(); }
+  else {
+    const gap = open * 175;
+    rrect(c, -lw / 2, -lh / 2 - gap, lw, lh, lh / 2); c.fill();
+    if (gap > .5) {
+      rrect(c, -lw / 2, -lh / 2 + gap, lw, lh, lh / 2); c.fill();
+      c.save(); c.beginPath(); c.rect(-W, -gap + lh / 2, 2 * W, 2 * gap - lh); c.clip();
+      const L = layout(c, 'CLAUDE', 290, 900, 8);
+      L.forEach((o, i) => {
+        const p = E.o5(inv(.64 + i * .035, 1.18 + i * .035, t));
+        cap(c, o.ch, o.x, (1 - p) * 330, 290, 900, C.paper);
+      });
+      c.restore();
+    }
+  }
+  const sub = inv(.92, 1.3, t);
+  if (sub > 0) {
+    c.globalAlpha = sub;
+    cap(c, 'MOTION  DESIGN  REEL', 0, -250, 28, 600, C.paper, { track: lerp(44, 14, E.o5(sub)) });
+    c.globalAlpha = 1;
+    mono(c, typed('2026  /  60 FPS  /  1920×1080', inv(1.0, 1.35, t)), 0, 252, 18, 'rgba(243,239,230,.7)', 'center', 4);
+  }
+  c.restore();
+  // iris out: paper ring leads, orange floods
+  const r1 = 1250 * E.io3(inv(1.40, 1.80, t)), r2 = 1250 * E.io3(inv(1.48, 1.875, t));
+  if (r1 > 0) { c.fillStyle = C.paper; circ(c, cx, cy, r1); c.fill(); }
+  if (r2 > 0) { c.fillStyle = C.orange; circ(c, cx, cy, r2); c.fill(); }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 1 — FORM: point-morphing shapes, squash & stretch, echoes
+// ═════════════════════════════════════════════════════════════════════════════
+const NP = 180, R = 190;
+function polyPts(v) {
+  const segs = []; let P = 0;
+  for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; const len = Math.hypot(b[0] - a[0], b[1] - a[1]); segs.push({ a, b, len }); P += len; }
+  const pts = []; let si = 0, acc = 0;
+  for (let k = 0; k < NP; k++) {
+    const d = k / NP * P;
+    while (acc + segs[si].len < d) { acc += segs[si].len; si++; }
+    const s = segs[si], u = (d - acc) / s.len;
+    pts.push([lerp(s.a[0], s.b[0], u), lerp(s.a[1], s.b[1], u)]);
+  }
+  return pts;
+}
+const reg = (n, r, off = -Math.PI / 2) => Array.from({ length: n }, (_, i) => [Math.cos(off + i * TAU / n) * r, Math.sin(off + i * TAU / n) * r]);
+const SH = [
+  Array.from({ length: NP }, (_, k) => { const a = -Math.PI / 2 + k / NP * TAU; return [Math.cos(a) * R, Math.sin(a) * R]; }),
+  polyPts(reg(4, R * 1.3)),
+  polyPts(reg(3, R * 1.45)),
+  polyPts(Array.from({ length: 10 }, (_, i) => { const a = -Math.PI / 2 + i * TAU / 10, r = i % 2 ? R * .56 : R * 1.35; return [Math.cos(a) * r, Math.sin(a) * r]; })),
+];
+function shapeAt(t) {
+  const k = Math.min(3, Math.floor(t / B)), p = t - k * B;
+  let pts;
+  if (k === 0) pts = SH[0];
+  else { const m = E.oBack(inv(0, .26, p), 2.4); pts = SH[k - 1].map((a, i) => [lerp(a[0], SH[k][i][0], m), lerp(a[1], SH[k][i][1], m)]); }
+  let rot = 0;
+  for (let j = 1; j <= 3; j++) rot += Math.PI / 2 * E.oBack(inv(j * B, j * B + .32, t), 1.6);
+  const sq = k === 0 ? 0 : Math.exp(-p * 9) * Math.sin(p * 40);
+  const sc = k === 0 ? spring(t - .02, 15, .32) : 1;
+  return { pts, rot, sx: (1 + .24 * sq) * sc, sy: (1 - .24 * sq) * sc };
+}
+function pathPts(c, pts) { c.beginPath(); c.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]); c.closePath(); }
+function s1(c, t) {
+  bg(c, C.orange);
+  const cx = W / 2, cy = H / 2;
+  // pulse rings
+  const ph = E.o3((t % B) / B);
+  c.lineWidth = 2; c.strokeStyle = 'rgba(10,10,15,.16)';
+  for (let i = 0; i < 14; i++) { circ(c, cx, cy, 110 + (i + ph) * 90); c.stroke(); }
+  // giant outlined word drifting
+  c.save(); c.globalAlpha = .55;
+  cap(c, 'FORM', cx + lerp(90, -90, t / BAR), cy, 470, 900, C.ink, { stroke: 2.5, track: 24 });
+  c.restore();
+  const grow = E.iExpo(inv(3 * B + .1, BAR, t));
+  // orbiters (back half)
+  const orb = (front) => {
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * TAU + t * 1.7, z = Math.sin(a);
+      if ((z > 0) !== front) continue;
+      const x = cx + Math.cos(a) * 470, y = cy + z * 150 - Math.cos(a) * 60;
+      const s = (14 + 8 * z) * (1 + .5 * Math.exp(-((t % B)) * 10)) * (1 - grow);
+      c.fillStyle = i % 3 === 0 ? C.paper : C.ink;
+      c.save(); c.translate(x, y); c.rotate(a * 2);
+      if (i % 2) { c.fillRect(-s, -s, 2 * s, 2 * s); } else { circ(c, 0, 0, s); c.fill(); }
+      c.restore();
+    }
+  };
+  orb(false);
+  // echoes
+  for (let k = 6; k >= 1; k--) {
+    const S = shapeAt(Math.max(0, t - k * .035));
+    c.save(); c.translate(cx, cy); c.scale(S.sx, S.sy); c.rotate(S.rot);
+    c.globalAlpha = .55 * (1 - k / 7) * (1 - grow);
+    c.strokeStyle = C.paper; c.lineWidth = 3; pathPts(c, S.pts); c.stroke(); c.restore();
+  }
+  // main shape
+  const S = shapeAt(t), g = 1 + grow * 15;
+  c.save(); c.translate(cx, cy); c.scale(S.sx * g, S.sy * g); c.rotate(S.rot + grow * 1.2);
+  c.fillStyle = C.ink; pathPts(c, S.pts); c.fill();
+  const pulse = 16 + 14 * Math.exp(-(t % B) * 12);
+  c.fillStyle = C.orange; circ(c, 0, 0, pulse * (S.sx > 0 ? 1 : 0) * (1 - grow)); c.fill();
+  c.restore();
+  orb(true);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 2 — TYPE: slam, eased letters, rhythm, marquee
+// ═════════════════════════════════════════════════════════════════════════════
+function sliceExit(c, e, draw) {
+  if (e <= 0) { draw(); return; }
+  const o = E.iExpo(e) * 1600;
+  c.save(); c.beginPath(); c.rect(0, 0, W, H / 2); c.clip(); c.translate(-o, 0); draw(); c.restore();
+  c.save(); c.beginPath(); c.rect(0, H / 2, W, H / 2); c.clip(); c.translate(o, 0); draw(); c.restore();
+}
+function s2(c, t) {
+  bg(c, C.ink);
+  const cx = W / 2, cy = H / 2;
+  const k = Math.min(3, Math.floor(t / B)), p = t - k * B;
+  const ex = inv(B - .09, B, p);
+  if (k === 0) {
+    const sc = q => lerp(2.8, 1, E.oExpo(inv(0, .2, q)));
+    // shockwave
+    const sw = inv(.05, .34, p);
+    if (sw > 0 && sw < 1) { c.strokeStyle = `rgba(255,74,28,${1 - sw})`; c.lineWidth = 40 * (1 - sw) + 2; circ(c, cx, cy, 200 + E.o3(sw) * 900); c.stroke(); }
+    sliceExit(c, ex, () => {
+      for (let g = 4; g >= 1; g--) {
+        c.save(); c.globalAlpha = .12; c.translate(cx, cy); const s = sc(p - g * .022); c.scale(s, s);
+        cap(c, 'TIMING', 0, 0, 290, 900, C.paper, { track: 6 }); c.restore();
+      }
+      c.save(); c.translate(cx, cy); const s = sc(p); c.scale(s, s);
+      cap(c, 'TIMING', 0, 0, 290, 900, C.paper, { track: 6 }); c.restore();
+      mono(c, `t = ${(p).toFixed(3)}s   ·   frame ${String(Math.floor((2 * BAR + p) * FPS)).padStart(4, '0')}`, cx, cy + 220, 20, C.orange, 'center', 4);
+    });
+  } else if (k === 1) {
+    sliceExit(c, ex, () => {
+      const L = layout(c, 'EASING', 290, 900, 6);
+      L.forEach((o, i) => {
+        const q = inv(i * .028, .24 + i * .028, p), e = E.oBack(q, 2.6);
+        c.save(); c.globalAlpha = clamp(q * 4);
+        c.translate(cx + o.x, cy - 40 + (1 - e) * 260); c.rotate((1 - e) * .5);
+        cap(c, o.ch, 0, 0, 290, 900, C.lime); c.restore();
+      });
+      // live easing graph
+      const gx = cx - 170, gy = cy + 260, gw = 340, gh = 100, q = inv(0, .36, p);
+      c.strokeStyle = 'rgba(243,239,230,.25)'; c.lineWidth = 1.5;
+      c.beginPath(); c.moveTo(gx, gy - gh - 30); c.lineTo(gx, gy); c.lineTo(gx + gw, gy); c.stroke();
+      c.strokeStyle = C.lime; c.lineWidth = 4; c.lineCap = 'round'; c.beginPath();
+      for (let i = 0; i <= 60 * q; i++) { const u = i / 60; const X = gx + u * gw, Y = gy - E.oBack(u, 2.6) * gh; i ? c.lineTo(X, Y) : c.moveTo(X, Y); }
+      c.stroke(); c.lineCap = 'butt';
+      const hy = gy - E.oBack(q, 2.6) * gh; c.fillStyle = C.paper; circ(c, gx + q * gw, hy, 8); c.fill();
+      mono(c, 'cubic-bezier(.34, 1.56, .64, 1)', gx + gw + 30, gy - gh / 2, 16, 'rgba(243,239,230,.6)', 'left', 2);
+    });
+  } else if (k === 2) {
+    sliceExit(c, ex, () => {
+      const L = layout(c, 'RHYTHM', 290, 900, 6), ent = E.oExpo(inv(0, .12, p));
+      c.save(); c.translate(cx, cy - 30); c.scale(lerp(.6, 1, ent), lerp(.6, 1, ent)); c.globalAlpha = ent;
+      L.forEach((o, i) => {
+        const j = Math.abs(Math.sin((p / (B / 4)) * Math.PI + i * .55));
+        cap(c, o.ch, o.x, -j * 70, 290, 900, i % 2 ? C.orange : C.paper);
+      });
+      c.restore();
+      // equaliser
+      for (let i = 0; i < 40; i++) {
+        const h = 10 + 80 * Math.abs(Math.sin(p * 22 + i * .7) * Math.cos(p * 9 + i * .3));
+        c.fillStyle = i % 8 === 3 ? C.orange : 'rgba(243,239,230,.5)';
+        c.fillRect(cx - 40 * 13 + i * 26, cy + 300 - h, 14, h);
+      }
+    });
+  } else {
+    // marquee wall
+    c.save(); c.translate(cx, cy); c.rotate(-.12);
+    const rows = 11, rh = 132, str = 'MOTION • DESIGN • KINETIC • ';
+    setFont(c, 112, 900); const tw = c.measureText(str).width;
+    for (let i = 0; i < rows; i++) {
+      const dir = i % 2 ? 1 : -1, y = (i - (rows - 1) / 2) * rh;
+      const ent = (1 - E.oExpo(inv(i * .012, .2 + i * .012, p))) * -dir * 2600;
+      const exi = E.iExpo(inv(B - .22 + Math.abs(i - 5) * .01, B, p)) * dir * 2600;
+      let x0 = ((dir * p * 1100 + i * 237) % tw) - tw * 2 - W / 2 + ent + exi;
+      const hero = i === 5;
+      for (let x = x0; x < W * .8; x += tw) {
+        if (hero) cap(c, str, x, y, 112, 900, C.orange, { align: 'left' });
+        else cap(c, str, x, y, 112, 900, 'rgba(243,239,230,.55)', { align: 'left', stroke: 2 });
+      }
+    }
+    c.restore();
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 3 — PARTICLES: swirl → assemble → explode → warp
+// ═════════════════════════════════════════════════════════════════════════════
+const NPART = 4400; let PART = [];
+const PBINS = [C.blue, C.violet, C.pink, C.orange, C.gold, C.lime].map(hex);
+function initParticles() {
+  const oc = mk(), o = oc.getContext('2d');
+  cap(o, 'FLOW', W / 2, H / 2, 560, 900, '#fff', { track: 10 });
+  const d = o.getImageData(0, 0, W, H).data, cand = [];
+  for (let y = 0; y < H; y += 4) for (let x = 0; x < W; x += 4) if (d[(y * W + x) * 4 + 3] > 128) cand.push([x, y]);
+  const r = rng(7);
+  for (let i = cand.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [cand[i], cand[j]] = [cand[j], cand[i]]; }
+  let minx = 1e9, maxx = -1e9; cand.forEach(p => { minx = Math.min(minx, p[0]); maxx = Math.max(maxx, p[0]); });
+  PART = Array.from({ length: NPART }, (_, i) => {
+    const [tx_, ty_] = cand[i % cand.length];
+    const ea = Math.atan2(ty_ - H / 2, tx_ - W / 2) + (r() - .5) * 1.1;
+    return {
+      tx: tx_ + (r() - .5) * 2, ty: ty_ + (r() - .5) * 2, a0: r() * TAU, r0: 380 + r() * 900, sp: .7 + r() * 1.3,
+      del: r() * .28, ea, ev: 500 + r() * 1600, ph: r() * TAU,
+      bin: Math.min(5, Math.floor((tx_ - minx) / (maxx - minx + 1) * 6)),
+    };
+  });
+}
+function partPos(P, t) {
+  const cx = W / 2, cy = H / 2;
+  const a = P.a0 + t * P.sp * 1.6, r = P.r0 * (1 - .3 * clamp(t));
+  const sx_ = cx + Math.cos(a) * r, sy_ = cy + Math.sin(a) * r * .58;
+  const q = E.io3(inv(P.del, P.del + .55, t));
+  let x = lerp(sx_, P.tx, q) + Math.sin(t * 5 + P.ph) * 2.5 * q;
+  let y = lerp(sy_, P.ty, q) + Math.cos(t * 4 + P.ph) * 2.5 * q;
+  const te = 2 * B;
+  if (t > te) {
+    const dt = t - te, dd = P.ev * (1 - Math.exp(-dt * 3.4)) / 3.4;
+    const sw = dt * .6;
+    x += Math.cos(P.ea + sw) * dd; y += Math.sin(P.ea + sw) * dd;
+  }
+  const w = E.iExpo(inv(1.38, BAR, t));
+  if (w > 0) { const dx = x - cx, dy = y - cy; x += dx * w * 6; y += dy * w * 6; }
+  return [x, y];
+}
+function s3(c, t) {
+  bg(c, '#06060B');
+  // dot field
+  c.fillStyle = 'rgba(243,239,230,.07)';
+  for (let y = 60; y < H; y += 60) for (let x = 60; x < W; x += 60) c.fillRect(x - 1, y - 1, 2, 2);
+  // glow while assembled
+  const gl = inv(.45, .7, t) * (1 - inv(2 * B, 2 * B + .12, t));
+  if (gl > 0) {
+    c.save(); c.globalAlpha = .22 * gl; c.shadowColor = C.pink; c.shadowBlur = 80;
+    cap(c, 'FLOW', W / 2, H / 2, 560, 900, C.violet, { track: 10 }); c.restore();
+  }
+  c.globalCompositeOperation = 'lighter'; c.lineCap = 'round';
+  const w = E.iExpo(inv(1.38, BAR, t));
+  c.lineWidth = 2.8 + w * 2;
+  const sweep = lerp(250, 1700, inv(.5, .92, t));
+  for (let b = 0; b < 6; b++) {
+    c.strokeStyle = rgb(PBINS[b], 1, .9); c.beginPath();
+    for (let i = 0; i < NPART; i++) {
+      const P = PART[i]; if (P.bin !== b) continue;
+      const [x, y] = partPos(P, t), [px, py] = partPos(P, t - .028);
+      c.moveTo(px, py); c.lineTo(x + .01, y);
+    }
+    c.stroke();
+  }
+  // shimmer sweep band
+  if (t > .5 && t < .95) {
+    const g = c.createLinearGradient(sweep - 120, 0, sweep + 120, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.5, 'rgba(255,255,255,.14)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    c.fillStyle = g; c.fillRect(sweep - 120, 0, 240, H);
+  }
+  c.globalCompositeOperation = 'source-over'; c.lineCap = 'butt';
+  mono(c, `${NPART} PARTICLES  ·  ANALYTIC SOLVE  ·  NO SIM CACHE`, W / 2, H - 150, 16, `rgba(243,239,230,${.6 * inv(.3, .6, t) * (1 - w)})`, 'center', 4);
+  // whiteout
+  const f = E.iExpo(inv(1.55, BAR, t));
+  if (f > 0) { c.fillStyle = `rgba(243,239,230,${f})`; c.fillRect(0, 0, W, H); }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 4 — DIMENSION: isometric cube field, drop-in + ripple
+// ═════════════════════════════════════════════════════════════════════════════
+const CN = 6, CUBES = []; { const r = rng(3); for (let i = -CN; i <= CN; i++) for (let j = -CN; j <= CN; j++) CUBES.push({ i, j, d: Math.hypot(i, j), rnd: r() }); }
+const cBlue = hex(C.blue), cOr = hex(C.orange), cInk = hex(C.ink), cLime = hex(C.lime);
+function s4(c, t) {
+  bg(c, C.paper);
+  // floor shadow
+  const sh = c.createRadialGradient(W / 2, H / 2 + 140, 50, W / 2, H / 2 + 140, 760);
+  sh.addColorStop(0, 'rgba(10,10,15,.14)'); sh.addColorStop(1, 'rgba(10,10,15,0)');
+  c.fillStyle = sh; c.fillRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2 + 120;
+  const th = Math.PI / 4 + t * .42 + .3 * E.io3(inv(1.2, BAR, t)), phi = .55;
+  const S = 64 * (1 + .1 * E.io3(inv(0, BAR, t)));
+  const cs = Math.cos(th), sn = Math.sin(th), cp = Math.cos(phi), sp = Math.sin(phi);
+  const P = (x, y, z) => { const rx = x * cs - z * sn, rz = x * sn + z * cs; return [cx + rx * S, cy + rz * sp * S - y * cp * S]; };
+  const ramp = E.io3(inv(.45, 1.0, t));
+  const list = CUBES.map(q => {
+    const del = q.d * .03 + q.rnd * .05;
+    const yoff = (1 - E.oBounce(inv(del, del + .55, t))) * 16;
+    const wave = .5 + .5 * Math.sin(q.d * .95 - t * 7);
+    const shrink = 1 - E.i3(inv(1.25 + q.d * .022, 1.6 + q.d * .022, t));
+    const h = (.35 + 2.4 * wave * ramp) * shrink;
+    return { ...q, yoff, h, wave, hs: .43 * shrink, rz: q.i * sn + q.j * cs };
+  }).sort((a, b) => a.rz - b.rz);
+  c.lineJoin = 'round'; c.lineWidth = 1;
+  for (const q of list) {
+    if (q.hs <= .005) continue;
+    const x0 = q.i - q.hs, x1 = q.i + q.hs, z0 = q.j - q.hs, z1 = q.j + q.hs, y0 = q.yoff, y1 = q.yoff + q.h;
+    const top = mix(mix(cBlue, cOr, q.wave * ramp), cLime, q.d < .5 ? ramp : 0);
+    const face = (pts, k) => { c.beginPath(); pts.forEach((p, n) => { const [X, Y] = P(...p); n ? c.lineTo(X, Y) : c.moveTo(X, Y); }); c.closePath(); c.fillStyle = rgb(top, k); c.fill(); c.strokeStyle = 'rgba(243,239,230,.18)'; c.stroke(); };
+    if (sn > 0) face([[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]], .62); else face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], .62);
+    if (cs > 0) face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], .8); else face([[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]], .8);
+    face([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], 1);
+  }
+  // headline
+  c.globalAlpha = inv(.3, .6, t) * (1 - inv(1.3, 1.5, t));
+  cap(c, 'DIMENSION', 120, 190, 96, 900, C.ink, { align: 'left', track: 4 });
+  mono(c, `169 MESHES  ·  θ ${(th * 180 / Math.PI).toFixed(1)}°  ·  ORTHO`, 124, 270, 16, 'rgba(10,10,15,.6)');
+  c.globalAlpha = 1;
+  // slanted double wipe
+  const wipe = (q, col) => { if (q <= 0) return; const X = lerp(-700, W + 700, q); c.fillStyle = col; c.beginPath(); c.moveTo(-1000, 0); c.lineTo(X + 320, 0); c.lineTo(X - 320, H); c.lineTo(-1000, H); c.closePath(); c.fill(); };
+  wipe(E.io3(inv(1.45, 1.80, t)), C.lime);
+  wipe(E.io3(inv(1.52, BAR, t)), C.ink);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 5 — DATA: rings, bars, line chart, counter
+// ═════════════════════════════════════════════════════════════════════════════
+const BARS1 = [180, 260, 140, 320, 230, 380, 300, 210, 350], BARS2 = [300, 150, 340, 200, 390, 240, 360, 280, 170];
+const LINE = (() => { const r = rng(11); let v = .2; return Array.from({ length: 48 }, (_, i) => { v += (r() - .38) * .09; v = clamp(v, .05, .95); return v; }); })();
+function panel(c, x, y, w, h, q, label) {
+  const len = 2 * (w + h);
+  c.save(); c.strokeStyle = 'rgba(243,239,230,.22)'; c.lineWidth = 1.5; c.setLineDash([len * q, len]);
+  rrect(c, x, y, w, h, 18); c.stroke(); c.restore();
+  mono(c, typed(label, q * 1.5), x + 28, y + 40, 15, 'rgba(243,239,230,.55)');
+}
+function s5(c, t) {
+  bg(c, C.ink);
+  gridLines(c, 1, .035);
+  const P = [[120, 150, 540, 580], [690, 150, 540, 580], [1260, 150, 540, 580], [120, 760, 1680, 170]];
+  const fly = i => -E.iExpo(inv(1.5 + i * .05, 1.86, t)) * 1400;
+  // A — rings
+  c.save(); c.translate(0, fly(0));
+  panel(c, ...P[0], E.o3(inv(0, .5, t)), '01 · COMPLETION');
+  const ax = 390, ay = 460, vals = [.92, .76, .58], cols = [C.lime, C.orange, C.blue];
+  vals.forEach((v, i) => {
+    const r = 175 - i * 42, pr = E.oExpo(inv(.12 + i * .08, .95 + i * .08, t)) * v;
+    c.lineWidth = 22; c.strokeStyle = 'rgba(243,239,230,.07)'; circ(c, ax, ay, r); c.stroke();
+    c.lineCap = 'round'; c.strokeStyle = cols[i]; c.beginPath(); c.arc(ax, ay, r, -Math.PI / 2, -Math.PI / 2 + TAU * pr); c.stroke(); c.lineCap = 'butt';
+  });
+  cap(c, Math.round(92 * E.oExpo(inv(.12, .95, t))) + '%', ax, ay, 64, 800, C.paper);
+  c.restore();
+  // B — bars
+  c.save(); c.translate(0, fly(1));
+  panel(c, ...P[1], E.o3(inv(.05, .55, t)), '02 · FRAMES / SHOT');
+  const base = 680, bx0 = 745;
+  c.strokeStyle = 'rgba(243,239,230,.3)'; c.lineWidth = 1.5; c.beginPath(); c.moveTo(bx0 - 10, base + .5); c.lineTo(bx0 - 10 + 450 * E.o5(inv(.1, .5, t)), base + .5); c.stroke();
+  for (let i = 0; i < 9; i++) {
+    const rise = E.oBack(inv(.18 + i * .035, .58 + i * .035, t), 2);
+    const sw = spring(t - 2 * B - i * .02, 16, .38);
+    const h = lerp(BARS1[i], BARS2[i], sw) * rise;
+    c.fillStyle = i === 4 ? C.lime : 'rgba(243,239,230,.88)';
+    rrect(c, bx0 + i * 50, base - h, 32, h, 6); c.fill();
+    if (rise > .9) mono(c, String(Math.round(h)), bx0 + i * 50 + 16, base - h - 18, 12, 'rgba(243,239,230,.6)', 'center', 0);
+  }
+  c.restore();
+  // C — line chart
+  c.save(); c.translate(0, fly(2));
+  panel(c, ...P[2], E.o3(inv(.1, .6, t)), '03 · AUDIENCE ↗');
+  const lx = 1300, ly = 260, lw = 460, lh = 400, q = E.io3(inv(.25, 1.35, t));
+  c.strokeStyle = 'rgba(243,239,230,.07)'; c.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) { c.beginPath(); c.moveTo(lx, ly + i * lh / 4 + .5); c.lineTo(lx + lw, ly + i * lh / 4 + .5); c.stroke(); }
+  const n = (LINE.length - 1) * q, pts = [];
+  for (let i = 0; i <= Math.floor(n); i++) pts.push([lx + i / (LINE.length - 1) * lw, ly + lh - LINE[i] * lh]);
+  if (n % 1 > 0 && Math.ceil(n) < LINE.length) { const i = Math.floor(n), f = n - i; pts.push([lx + (i + f) / (LINE.length - 1) * lw, ly + lh - lerp(LINE[i], LINE[i + 1], f) * lh]); }
+  if (pts.length > 1) {
+    const g = c.createLinearGradient(0, ly, 0, ly + lh); g.addColorStop(0, 'rgba(215,255,60,.35)'); g.addColorStop(1, 'rgba(215,255,60,0)');
+    c.fillStyle = g; c.beginPath(); c.moveTo(pts[0][0], ly + lh); pts.forEach(p => c.lineTo(...p)); c.lineTo(pts[pts.length - 1][0], ly + lh); c.fill();
+    c.strokeStyle = C.lime; c.lineWidth = 4; c.lineJoin = 'round'; c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(...p) : c.moveTo(...p)); c.stroke();
+    const hd = pts[pts.length - 1], pu = (t * 2.2) % 1;
+    c.strokeStyle = `rgba(215,255,60,${1 - pu})`; c.lineWidth = 2; circ(c, hd[0], hd[1], 8 + pu * 30); c.stroke();
+    c.fillStyle = C.paper; circ(c, hd[0], hd[1], 8); c.fill();
+    mono(c, '+' + (LINE[Math.min(LINE.length - 1, Math.round(n))] * 1000 | 0) + 'k', hd[0] - 14, hd[1] - 30, 14, C.lime, 'right', 1);
+  }
+  c.restore();
+  // D — counter strip
+  c.save(); c.translate(0, fly(3));
+  panel(c, ...P[3], E.o3(inv(.15, .7, t)), '04 · KEYFRAMES SET THIS YEAR');
+  const v = Math.floor(1048576 * E.o3(inv(.2, 1.35, t)));
+  cap(c, v.toLocaleString('en-US'), 160, 865, 84, 800, C.paper, { align: 'left', track: 2 });
+  const bw = 900 * E.o3(inv(.2, 1.35, t));
+  c.fillStyle = 'rgba(243,239,230,.1)'; c.fillRect(840, 862, 900, 6);
+  c.fillStyle = C.orange; c.fillRect(840, 862, bw, 6);
+  mono(c, 'RENDER QUEUE ' + Math.round(100 * E.o3(inv(.2, 1.35, t))) + '%', 1740, 830, 14, 'rgba(243,239,230,.6)', 'right');
+  c.restore();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 6 — MONTAGE: eight half-beat cuts, glitch hits, CRT off
+// ═════════════════════════════════════════════════════════════════════════════
+const CUTS = [
+  (c, p) => { bg(c, C.orange); const s = spring(p, 22, .3); c.save(); c.translate(W / 2 - 120, H / 2); c.scale(s, s); cap(c, '60', 0, 0, 640, 900, C.ink, { track: -20 }); c.restore(); cap(c, 'FPS', W / 2 + 330, H / 2 + 170, 130, 900, C.paper); },
+  (c, p, t) => {
+    bg(c, C.ink); c.save(); c.translate(W / 2, H / 2); c.rotate(t * 1.4 + p * 2);
+    for (let i = 0; i < 24; i++) { c.fillStyle = i % 2 ? C.lime : C.ink; c.beginPath(); c.moveTo(0, 0); c.arc(0, 0, 1400, i * TAU / 24, (i + 1) * TAU / 24); c.fill(); }
+    c.restore(); c.fillStyle = C.ink; circ(c, W / 2, H / 2, 150 + 30 * spring(p, 20, .3)); c.fill();
+    c.strokeStyle = C.lime; c.lineWidth = 10; circ(c, W / 2, H / 2, 110); c.stroke();
+  },
+  (c, p) => {
+    bg(c, C.paper); c.fillStyle = C.ink;
+    for (let y = 24; y < H + 48; y += 48) for (let x = 24; x < W + 48; x += 48) {
+      const d = Math.hypot(x - W / 2, y - H / 2), r = 21 * (.5 + .5 * Math.sin(d * .018 - p * 38));
+      if (r > .6) { circ(c, x, y, r); c.fill(); }
+    }
+  },
+  (c, p) => {
+    bg(c, C.blue); cap(c, 'KEYFRAME', W / 2 + lerp(80, 0, E.oExpo(p / .2)), H / 2 - 40, 230, 900, C.paper, { track: 4 });
+    for (let i = -1; i < 22; i++) { const x = i * 100 - (p * 900) % 100; c.save(); c.translate(x, H / 2 + 170); c.rotate(Math.PI / 4); c.fillStyle = i % 5 === 2 ? C.lime : 'rgba(243,239,230,.6)'; c.fillRect(-14, -14, 28, 28); c.restore(); }
+    c.fillStyle = 'rgba(243,239,230,.4)'; c.fillRect(0, H / 2 + 169, W, 2);
+  },
+  (c, p, t) => {
+    bg(c, C.ink); c.save(); c.translate(W / 2, H / 2); c.lineWidth = 7;
+    for (let i = 0; i < 16; i++) { const z = (i + p * 9) % 16, s = 40 * Math.pow(1.27, z); c.save(); c.rotate(z * .12 + t); c.strokeStyle = i % 2 ? C.pink : C.paper; c.globalAlpha = clamp(z / 3); c.strokeRect(-s, -s, 2 * s, 2 * s); c.restore(); }
+    c.restore();
+  },
+  (c, p) => { bg(c, C.lime); c.save(); c.translate(W / 2, H / 2 + 20); c.rotate(-.15 + p * .8); const s = lerp(1.25, 1, E.oExpo(p / .15)); c.scale(s, s); cap(c, '&', 0, 0, 900, 900, C.ink); c.restore(); },
+  (c, p) => {
+    bg(c, C.pink); c.fillStyle = C.ink; const s = 120;
+    for (let j = 0; j < 9; j++) for (let i = 0; i < 16; i++) if ((i + j) % 2 === 0) { const k = .5 + .5 * Math.sin(i * .6 + j * .6 - p * 30); const q = s * k; c.fillRect(i * s + (s - q) / 2, j * s + (s - q) / 2, q, q); }
+  },
+  (c, p) => {
+    bg(c, C.ink); const s = spring(p, 20, .35);
+    c.save(); c.translate(W / 2, H / 2); c.scale(lerp(.8, 1, s), lerp(.8, 1, s));
+    cap(c, 'ALL OUT', -40, 0, 270, 900, C.paper, { track: 4 }); c.fillStyle = C.orange; circ(c, 600, 82, 34 * s); c.fill(); c.restore();
+  },
+];
+function s6(c, t) {
+  const hb = B / 2, k = Math.min(7, Math.floor(t / hb)), p = t - k * hb;
+  FX.glitch = p < .075 ? 1 - p / .075 : 0;
+  const crt = inv(BAR - .2, BAR, t);
+  if (crt <= 0) { CUTS[k](c, p, t); return; }
+  CUTS[k](tx2, p, t);
+  bg(c, '#000');
+  const a = E.i3(inv(0, .6, crt)), b = E.iExpo(inv(.55, 1, crt));
+  const hh = lerp(H, 4, a), ww = lerp(W, 0, b);
+  if (a < 1) { c.drawImage(tmp2, 0, (H - hh) / 2, W, hh); c.fillStyle = `rgba(255,255,255,${a})`; c.fillRect(0, (H - hh) / 2, W, hh); }
+  else { c.fillStyle = '#fff'; c.shadowColor = '#fff'; c.shadowBlur = 40; c.fillRect((W - ww) / 2, H / 2 - 2, ww, 4); c.shadowBlur = 0; }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  SCENE 7 — END CARD: CRT on, mark, name, credits
+// ═════════════════════════════════════════════════════════════════════════════
+function endCard(c, t) {
+  bg(c, C.ink); gridLines(c, 1, .045);
+  const cx = W / 2, push = 1 + .045 * E.io3(inv(.2, BAR, t));
+  c.save(); c.translate(cx, H / 2); c.scale(push, push); c.translate(-cx, -H / 2);
+  // mark: orange ring + 8-ray spark
+  const my = 350, rp = E.oExpo(inv(.22, .85, t));
+  c.lineCap = 'round';
+  c.strokeStyle = C.orange; c.lineWidth = 16; c.beginPath(); c.arc(cx, my, 80, -Math.PI / 2, -Math.PI / 2 + TAU * rp); c.stroke();
+  c.save(); c.translate(cx, my); c.rotate(t * .6); c.strokeStyle = C.paper; c.lineWidth = 11;
+  for (let i = 0; i < 8; i++) { const l = 42 * E.oBack(inv(.42 + i * .03, .78 + i * .03, t), 2.2); if (l <= 0) continue; const a = i * TAU / 8; c.beginPath(); c.moveTo(Math.cos(a) * 10, Math.sin(a) * 10); c.lineTo(Math.cos(a) * (10 + l), Math.sin(a) * (10 + l)); c.stroke(); }
+  c.restore(); c.lineCap = 'butt';
+  // name
+  const L = layout(c, 'CLAUDE', 168, 900, 14);
+  c.save(); c.beginPath(); c.rect(0, 560 - 100, W, 200); c.clip();
+  L.forEach((o, i) => { const q = E.o5(inv(.45 + i * .04, .95 + i * .04, t)); cap(c, o.ch, cx + o.x, 560 + (1 - q) * 200, 168, 900, C.paper); });
+  c.restore();
+  const s = inv(.85, 1.25, t);
+  c.globalAlpha = s; cap(c, 'MOTION DESIGNER', cx, 672, 36, 600, C.orange, { track: lerp(34, 16, E.o5(s)) }); c.globalAlpha = 1;
+  const lw = 620 * E.io3(inv(.95, 1.4, t));
+  c.fillStyle = 'rgba(243,239,230,.3)'; c.fillRect(cx - lw / 2, 735, lw, 2);
+  mono(c, typed('SHOWREEL 2026  ·  1080p60  ·  AVAILABLE FOR HIRE', inv(1.05, 1.5, t)), cx, 785, 19, 'rgba(243,239,230,.72)', 'center', 4);
+  c.restore();
+}
+function s7(c, t) {
+  const on = inv(0, .32, t);
+  if (on >= 1) { endCard(c, t); }
+  else {
+    endCard(tx2, t); bg(c, '#000');
+    const a = E.oExpo(inv(0, .4, on)), b = E.io3(inv(.35, 1, on));
+    const ww = lerp(0, W, a), hh = lerp(4, H, b);
+    if (b <= 0) { c.fillStyle = '#fff'; c.shadowColor = '#fff'; c.shadowBlur = 40; c.fillRect((W - ww) / 2, H / 2 - 2, ww, 4); c.shadowBlur = 0; }
+    else { c.drawImage(tmp2, 0, (H - hh) / 2, W, hh); c.fillStyle = `rgba(255,255,255,${1 - b})`; c.fillRect(0, (H - hh) / 2, W, hh); }
+  }
+  const f = inv(DUR - BAR * 7 - .22, DUR - BAR * 7, t);
+  if (f > 0) { c.fillStyle = `rgba(0,0,0,${E.io3(f)})`; c.fillRect(0, 0, W, H); }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  COMPOSITOR — camera shake, punch-in, RGB split, glitch, HUD, grain
+// ═════════════════════════════════════════════════════════════════════════════
+const SCENES = [s0, s1, s2, s3, s4, s5, s6, s7];
+const NAMES = ['', 'FORM', 'TYPE', 'PARTICLES', 'DIMENSION', 'DATA', 'MONTAGE', ''];
+const IMPACTS = [
+  [BAR, .7], [2 * BAR, .6], [2 * BAR + .03, 1.1], [2 * BAR + B, .35], [2 * BAR + 2 * B, .35], [2 * BAR + 3 * B, .5],
+  [3 * BAR + 2 * B, 1.2], [4 * BAR, .5], [4 * BAR + .55, .5], [5 * BAR, .6],
+  ...Array.from({ length: 8 }, (_, i) => [6 * BAR + i * B / 2, i ? .4 : 1]), [7 * BAR + .3, .8], [7 * BAR + .95, .4],
+];
+const GRAIN = Array.from({ length: 6 }, (_, k) => {
+  const g = mk(512, 512), x = g.getContext('2d'), d = x.createImageData(512, 512), r = rng(100 + k);
+  for (let i = 0; i < d.data.length; i += 4) { const v = r() * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+  x.putImageData(d, 0, 0); return g;
+});
+let VIG;
+function impactAt(T) { let k = 0; for (const [ti, a] of IMPACTS) if (T >= ti) k += a * Math.exp(-(T - ti) * 11); return k; }
+function rgbSplit(dst, src, off) {
+  dst.fillStyle = '#000'; dst.fillRect(0, 0, W, H);
+  [['#f00', -off, 0], ['#0f0', 0, 0], ['#00f', off, off * .3]].forEach(([col, dx, dy]) => {
+    tx.globalCompositeOperation = 'copy'; tx.drawImage(src, 0, 0);
+    tx.globalCompositeOperation = 'multiply'; tx.fillStyle = col; tx.fillRect(0, 0, W, H);
+    tx.globalCompositeOperation = 'source-over';
+    dst.globalCompositeOperation = 'lighter'; dst.drawImage(tmp, dx, dy); dst.globalCompositeOperation = 'source-over';
+  });
+}
+function hud(c, T, f) {
+  const a = inv(BAR, BAR + .25, T) * (1 - inv(7 * BAR - .2, 7 * BAR, T));
+  if (a <= 0) return;
+  c.save(); c.globalCompositeOperation = 'difference'; c.globalAlpha = a;
+  const fr = Math.floor(T * FPS), ss = Math.floor(T), ff = fr % FPS;
+  mono(c, "CLAUDE  /  MOTION REEL '26", 64, 62, 15, '#fff');
+  mono(c, `TC 00:00:${String(ss).padStart(2, '0')}:${String(ff).padStart(2, '0')}`, W - 64, 62, 15, '#fff', 'right');
+  const si = Math.min(7, Math.floor(T / BAR));
+  mono(c, `0${si} — ${NAMES[si]}`, 64, H - 58, 15, '#fff');
+  const px = W - 64 - 360;
+  c.fillStyle = 'rgba(255,255,255,.35)'; c.fillRect(px, H - 59, 360, 2);
+  c.fillStyle = '#fff'; c.fillRect(px, H - 60, 360 * T / DUR, 4);
+  for (let i = 0; i <= 8; i++) c.fillRect(px + i * 45 - 1, H - 66, 2, 16);
+  // crop marks
+  c.fillStyle = '#fff';
+  for (const [x, y, sx_, sy_] of [[36, 36, 1, 1], [W - 36, 36, -1, 1], [36, H - 36, 1, -1], [W - 36, H - 36, -1, -1]]) { c.fillRect(x, y, 28 * sx_, 2 * sy_); c.fillRect(x, y, 2 * sx_, 28 * sy_); }
+  c.restore();
+}
+function render(f) {
+  const T = Math.min(f / FPS, DUR - 1e-6);
+  const si = Math.min(7, Math.floor(T / BAR)), lt = T - si * BAR;
+  FX.glitch = 0;
+  sx.setTransform(1, 0, 0, 1, 0, 0); sx.globalAlpha = 1; sx.globalCompositeOperation = 'source-over';
+  SCENES[si](sx, lt);
+  const k = Math.min(impactAt(T), 1.6);
+  const dx = k * 20 * Math.sin(T * 97.3) * Math.sin(T * 13.1 + 1), dy = k * 20 * Math.cos(T * 83.1) * Math.sin(T * 17.7 + 2);
+  const zs = 1 + k * .028;
+  // stage camera into tmp2 (scene shake/zoom)
+  tx2.setTransform(1, 0, 0, 1, 0, 0); tx2.fillStyle = '#000'; tx2.fillRect(0, 0, W, H);
+  tx2.setTransform(zs, 0, 0, zs, W / 2 * (1 - zs) + dx, H / 2 * (1 - zs) + dy); tx2.drawImage(scene, 0, 0);
+  tx2.setTransform(1, 0, 0, 1, 0, 0);
+  const split = k * 9 + FX.glitch * 18;
+  out.setTransform(1, 0, 0, 1, 0, 0); out.globalAlpha = 1; out.globalCompositeOperation = 'source-over';
+  if (split > .8) rgbSplit(out, tmp2, split); else out.drawImage(tmp2, 0, 0);
+  if (FX.glitch > 0) {
+    tx.globalCompositeOperation = 'copy'; tx.drawImage(cv, 0, 0); tx.globalCompositeOperation = 'source-over';
+    const r = rng(f * 31 + 5);
+    for (let i = 0; i < 9; i++) { const y = r() * H, h = 8 + r() * 90, o = (r() - .5) * 260 * FX.glitch; out.drawImage(tmp, 0, y, W, h, o, y, W, h); }
+  }
+  hud(out, T, f);
+  // vignette + grain
+  out.fillStyle = VIG; out.fillRect(0, 0, W, H);
+  out.globalCompositeOperation = 'overlay'; out.globalAlpha = .09;
+  const g = GRAIN[f % GRAIN.length], r = rng(f * 7 + 1), ox = -r() * 512, oy = -r() * 512;
+  for (let y = oy; y < H; y += 512) for (let x = ox; x < W; x += 512) out.drawImage(g, x, y);
+  out.globalCompositeOperation = 'source-over'; out.globalAlpha = 1;
+}
+
+// ── boot ────────────────────────────────────────────────────────────────────
+window.READY = (async () => {
+  await Promise.all([document.fonts.load(`900 100px "Inter Display"`), document.fonts.load(`800 100px "Inter Display"`), document.fonts.load(`600 100px "Inter Display"`), document.fonts.load(`500 16px ${MONO}`)]);
+  VIG = out.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * 1.05);
+  VIG.addColorStop(0, 'rgba(0,0,0,0)'); VIG.addColorStop(1, 'rgba(0,0,0,.5)');
+  initParticles();
+  return true;
+})();
+window.renderFrame = f => render(f);
+window.TOTAL_FRAMES = DUR * FPS;
+
+if (!new URLSearchParams(location.search).has('render')) {
+  // live preview: plays in real time, loops; uses soundtrack if present
+  const audio = new Audio('soundtrack.wav'); audio.loop = true;
+  let t0 = null;
+  window.READY.then(() => {
+    const loop = now => { if (t0 === null) t0 = now; const T = ((now - t0) / 1000) % DUR; render(Math.floor(T * FPS)); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+    document.addEventListener('click', () => { t0 = null; audio.currentTime = 0; audio.play().catch(() => {}); });
+  });
+}
+</script>
+</body>
+</html>
